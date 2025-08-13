@@ -1,0 +1,23 @@
+[package]
+name = "dds-converter"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+walkdir = "2.0"
+tempfile = "3.0"
+indicatif = "0.17"
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = "z"          # Otimizar para tamanho
+lto = true               # Link Time Optimization
+codegen-units = 1        # Melhor otimização
+panic = "abort"          # Reduzir tamanho removendo unwinding
+strip = true             # Remover símbolos de debug

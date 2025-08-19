@@ -3,8 +3,8 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    // Caminho para o texconv.exe no diretório pai
-    let texconv_source = "../texconv.exe";
+    // Caminho para o texconv.exe no diretório atual
+    let texconv_source = "texconv.exe";
     
     if !Path::new(texconv_source).exists() {
         panic!("texconv.exe não encontrado em: {}", texconv_source);

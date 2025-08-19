@@ -1,189 +1,31 @@
+mod cli;
+mod texconv;
+mod processor;
+mod utils;
+mod animation;
+mod sprite;
+
 use clap::Parser;
 use anyhow::{Result, Context};
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
-use tokio::fs;
+use std::path::{Path, PathBuf};
 use tokio::sync::Semaphore;
-use walkdir::WalkDir;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::env;
 
-// Embutir o texconv.exe no binário
-const TEXCONV_EXE: &[u8] = include_bytes!("../texconv.exe");
-
-#[derive(Parser)]
-#[command(name = "dds-converter")]
-#[command(about = "DDS file converter using embedded texconv.exe")]
-struct Cli {
-    /// Input folder with .dds files
-    #[arg(short, long)]
-    input: PathBuf,
-
-    /// Output folder for converted files
-    #[arg(short, long)]
-    output: PathBuf,
-
-    /// Output format (png, jpg, bmp, tga, dds, etc.)
-    #[arg(short, long, default_value = "png")]
-    format: String,
-
-    /// Number of folder segments to remove from output path
-    #[arg(short, long, default_value = "0")]
-    strip_segments: usize,
-
-    /// Number of parallel processes
-    #[arg(short, long, default_value = "4")]
-    concurrency: usize,
-
-    /// Only show which files would be processed
-    #[arg(short, long)]
-    dry_run: bool,
-
-    /// Show detailed information during processing
-    #[arg(short, long)]
-    verbose: bool,
-
-    /// Continue processing even if errors occur in specific files
-    #[arg(long)]
-    continue_on_error: bool,
-}
-
-async fn test_texconv(texconv_path: &Path) -> Result<()> {
-    let test_output = Command::new(texconv_path)
-        .arg("-h")
-        .output()
-        .context("Failed to run texconv.exe for test")?;
-    
-    // texconv.exe returns code 1 for -h, but that's normal
-    if test_output.status.code() != Some(0) && test_output.status.code() != Some(1) {
-        anyhow::bail!("texconv.exe returned unexpected error code in test: code {:?}\n{}", 
-                     test_output.status.code(),
-                     String::from_utf8_lossy(&test_output.stderr));
-    }
-    
-    Ok(())
-}
-
-async fn setup_texconv() -> Result<PathBuf> {
-    let temp_dir = env::temp_dir().join("dds-converter-rust");
-    fs::create_dir_all(&temp_dir).await
-        .context("Failed to create temporary directory")?;
-    
-    let texconv_path = temp_dir.join("texconv.exe");
-    
-    if texconv_path.exists() {
-        if test_texconv(&texconv_path).await.is_ok() {
-            return Ok(texconv_path);
-        }
-        let _ = fs::remove_file(&texconv_path).await;
-    }
-    
-    fs::write(&texconv_path, TEXCONV_EXE).await
-        .context("Failed to extract texconv.exe")?;
-    
-    test_texconv(&texconv_path).await
-        .context("Error testing texconv.exe")?;
-    
-    Ok(texconv_path)
-}
-
-fn calculate_output_path(input_path: &Path, input_dir: &Path, output_dir: &Path, strip_segments: usize, format: &str) -> PathBuf {
-    // Get the relative path from input directory to the file
-    let relative_path = input_path.strip_prefix(input_dir).unwrap_or(input_path);
-    
-    // Apply strip_segments if specified
-    let path_components: Vec<_> = relative_path.components().collect();
-    let components_to_use = if strip_segments < path_components.len() {
-        &path_components[strip_segments..]
-    } else {
-        &path_components[..]
-    };
-    
-    // Build the output path maintaining the directory structure
-    let mut result_path = output_dir.to_path_buf();
-    for component in components_to_use {
-        result_path.push(component);
-    }
-    
-    // Change the extension to the target format
-    result_path.with_extension(format)
-}
-
-async fn process_file(
-    file_path: &Path,
-    texconv_path: &Path,
-    input_dir: &Path,
-    output_dir: &Path,
-    strip_segments: usize,
-    verbose: bool,
-    format: &str,
-    continue_on_error: bool,
-) -> Result<()> {
-    let metadata = fs::metadata(file_path).await
-        .context("Failed to read file metadata")?;
-    
-    if metadata.len() < 128 {
-        if verbose {
-            println!("⚠️  Skipping very small file: {}", file_path.display());
-        }
-        return Ok(());
-    }
-
-    let output_path = calculate_output_path(file_path, input_dir, output_dir, strip_segments, format);
-    
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).await
-            .context("Failed to create output directory")?;
-    }
-
-    if verbose {
-        println!("🔄 Processing: {} -> {}", 
-                file_path.display(), output_path.display());
-    }
-
-    let output = Command::new(texconv_path)
-        .arg("-f")
-        .arg("R8G8B8A8_UNORM")
-        .arg("-ft")
-        .arg(format)
-        .arg("-y")  // Overwrite existing files
-        .arg("-o")
-        .arg(output_path.parent().unwrap())
-        .arg(file_path)
-        .output()
-        .context("Failed to run texconv")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        
-        let error_msg = format!(
-            "texconv failed for {}: code {}\nStderr: {}\nStdout: {}",
-            file_path.display(),
-            output.status.code().unwrap_or(-1),
-            stderr,
-            stdout
-        );
-        
-        if continue_on_error {
-            println!("⚠️  {}", error_msg);
-            return Ok(());
-        } else {
-            anyhow::bail!(error_msg);
-        }
-    }
-
-    if verbose {
-        println!("✅ Done: {}", output_path.display());
-    }
-
-    Ok(())
-}
+use cli::Cli;
+use texconv::setup_texconv;
+use processor::{calculate_output_path, process_file};
+use utils::find_dds_files;
+use animation::{find_image_sequences, find_sprite_sequences, create_webp_animation, create_animation_from_sprite_sheet};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    
+    // Handle animation mode
+    if cli.animation_mode {
+        return handle_animation_mode(&cli).await;
+    }
     
     let texconv_path = setup_texconv().await?;
     
@@ -193,22 +35,7 @@ async fn main() -> Result<()> {
     
     println!("🔍 Searching for DDS files in: {}", cli.input.display());
     
-    let dds_files: Vec<PathBuf> = WalkDir::new(&cli.input)
-        .into_iter()
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.is_file() && 
-               path.extension()
-                   .and_then(|ext| ext.to_str())
-                   .map(|ext| ext.to_lowercase() == "dds")
-                   .unwrap_or(false) {
-                Some(path.to_path_buf())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let dds_files = find_dds_files(&cli.input);
 
     if dds_files.is_empty() {
         println!("❌ No .dds files found!");
@@ -292,4 +119,167 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn handle_animation_mode(cli: &Cli) -> Result<()> {
+    println!("🎬 Animation mode: Converting sequences to {}", cli.animation_format.to_uppercase());
+    println!("🔍 Searching for sequences in: {}", cli.input.display());
+    
+    // First, look for sprite sheets (DDS + .sprite files)
+    let sprite_sequences = find_sprite_sequences(&cli.input)?;
+    
+    if !sprite_sequences.is_empty() {
+        println!("📊 Found {} sprite sheet(s)", sprite_sequences.len());
+        
+        // Create output directory
+        tokio::fs::create_dir_all(&cli.output).await?;
+        
+        for (dds_path, sprite_path) in sprite_sequences {
+            println!("🎞️  Processing sprite sheet: {}", dds_path.display());
+            
+            if cli.verbose {
+                println!("  DDS: {}", dds_path.display());
+                println!("  Sprite: {}", sprite_path.display());
+            }
+            
+            // Generate output filename
+            let base_name = dds_path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("animation");
+            
+            let output_filename = format!("{}.{}", base_name, cli.animation_format);
+            let output_path = cli.output.join(output_filename);
+            
+            println!("📤 Creating: {}", output_path.display());
+            
+            create_animation_from_sprite_sheet(
+                &dds_path,
+                &sprite_path,
+                &output_path,
+                cli.frame_delay,
+                &cli.animation_format
+            )?;
+        }
+        
+        println!("🎉 All sprite sheet animations created successfully!");
+        return Ok(());
+    }
+    
+    // Fallback to regular image sequences
+    let sequences = find_image_sequences(&cli.input)?;
+    
+    if sequences.is_empty() {
+        println!("❌ No image sequences found!");
+        println!("💡 Make sure your image files follow a naming pattern like:");
+        println!("   - animation_001.png, animation_002.png");
+        println!("   - named_bg_1.dds, named_bg_2.dds");
+        println!("   - frame1.jpg, frame2.jpg");
+        return Ok(());
+    }
+    
+    println!("📊 Found {} PNG sequence(s)", sequences.len());
+    
+    // Create output directory
+    tokio::fs::create_dir_all(&cli.output).await?;
+    
+    for (seq_idx, sequence) in sequences.iter().enumerate() {
+        println!("🎞️  Processing sequence {} with {} frames", seq_idx + 1, sequence.len());
+        
+        if cli.verbose {
+            for (i, file) in sequence.iter().enumerate() {
+                println!("  Frame {}: {}", i + 1, file.display());
+            }
+        }
+        
+        // Generate output filename based on first file in sequence
+        let first_file = &sequence[0];
+        let base_name = first_file.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("animation");
+        
+        // Remove numeric suffix if present
+        let clean_base = if let Some(pos) = base_name.rfind('_') {
+            let (base, suffix) = base_name.split_at(pos);
+            if suffix[1..].chars().all(|c| c.is_ascii_digit()) {
+                base
+            } else {
+                base_name
+            }
+        } else {
+            base_name
+        };
+        
+        let output_filename = format!("{}.{}", clean_base, cli.animation_format);
+        let output_path = cli.output.join(output_filename);
+        
+        println!("📤 Creating: {}", output_path.display());
+        
+        // Check if we need to convert DDS files first
+        let has_dds = sequence.iter().any(|f| {
+            f.extension().and_then(|s| s.to_str()).unwrap_or("") == "dds"
+        });
+        
+        let processed_sequence = if has_dds {
+            println!("🔄 Converting DDS files to PNG first...");
+            let texconv_path = setup_texconv().await?;
+            convert_dds_sequence_to_png(sequence, &texconv_path, &cli.output).await?
+        } else {
+            sequence.clone()
+        };
+        
+        match cli.animation_format.as_str() {
+            "webp" => {
+                create_webp_animation(&processed_sequence, &output_path, cli.frame_delay)?;
+                println!("✅ WebP animation created successfully!");
+            }
+            _ => {
+                println!("❌ Only WebP format is supported (with transparency)");
+                continue;
+            }
+        }
+    }
+    
+    println!("🎉 All animations created successfully!");
+    Ok(())
+}
+
+async fn convert_dds_sequence_to_png(
+    dds_files: &[PathBuf], 
+    texconv_path: &Path, 
+    temp_dir: &Path
+) -> Result<Vec<PathBuf>> {
+    let mut png_files = Vec::new();
+    
+    // Create temp directory for PNG conversion
+    let png_temp_dir = temp_dir.join("temp_png");
+    tokio::fs::create_dir_all(&png_temp_dir).await?;
+    
+    for dds_file in dds_files {
+        let png_name = dds_file.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("frame");
+        let png_path = png_temp_dir.join(format!("{}.png", png_name));
+        
+        // Convert DDS to PNG using texconv
+        let output = std::process::Command::new(texconv_path)
+            .arg("-f")
+            .arg("R8G8B8A8_UNORM")
+            .arg("-ft")
+            .arg("png")
+            .arg("-y")
+            .arg("-o")
+            .arg(&png_temp_dir)
+            .arg(dds_file)
+            .output()
+            .context("Failed to run texconv for DDS conversion")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("texconv failed for {}: {}", dds_file.display(), stderr);
+        }
+        
+        png_files.push(png_path);
+    }
+    
+    Ok(png_files)
 }

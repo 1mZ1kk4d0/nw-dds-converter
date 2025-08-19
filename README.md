@@ -12,6 +12,17 @@ A fast, parallel DDS (DirectDraw Surface) file converter built in Rust with embe
 - 🔍 **Dry-run mode** - Preview what will be processed without actual conversion
 - 📊 **Progress tracking** - Real-time progress bar with statistics
 
+## Code Structure
+
+The project is organized into modular components for better maintainability:
+
+- **`main.rs`** - Main application entry point and orchestration
+- **`cli.rs`** - Command-line interface definition and parsing
+- **`texconv.rs`** - Functions for managing the embedded texconv.exe tool
+- **`processor.rs`** - File processing logic and output path calculation
+- **`utils.rs`** - Utility functions like DDS file discovery
+- **`build.rs`** - Build script for embedding texconv.exe
+
 ## Installation
 
 ### Option 1: Download Release Binary
